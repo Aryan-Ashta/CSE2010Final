@@ -1,4 +1,3 @@
-package aryan;
 
 /*
 
@@ -114,7 +113,6 @@ public class HangmanPlayer
     }
  
  
-    // guess
     public char guess(String currentWord, boolean isNewWord)
     {
         if (isNewWord)
@@ -193,7 +191,6 @@ public class HangmanPlayer
     }
  
  
-    // feedback
     public void feedback(boolean isCorrectGuess, String currentWord)
     {
         if (!isCorrectGuess) {
@@ -215,7 +212,6 @@ public class HangmanPlayer
     }
  
  
-    // filterCandidates: compact-forward pass, no extra allocation
     private void filterCandidates()
     {
         int write = 0;
