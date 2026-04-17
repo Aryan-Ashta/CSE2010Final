@@ -235,7 +235,15 @@ public class HangmanPlayer
     {
         for (int i = 0; i < wordLen; i++) {
             char p = posPattern[i];
-            if (p != ' ' && word.charAt(i) != p) return false;
+            if (p != ' ') {
+                // Revealed position: candidate must match exactly
+                if (word.charAt(i) != p) return false;
+            } else {
+                
+                //fix here
+                int idx = word.charAt(i) - 'a';
+                if (idx >= 0 && idx < 26 && (presentMask >> idx & 1) == 1) return false;
+            }
         }
         return true;
     }
