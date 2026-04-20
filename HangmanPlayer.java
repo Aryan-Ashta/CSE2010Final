@@ -1,7 +1,7 @@
 
 /*
 
-  Authors (group members): Aryan Ashta
+  Authors (group members): Aryan, Robert, Obsidian, Shur
   Email addresses of group members: aashta2025@my.fit.edu
   Group name: The Data Crunchers
 
@@ -33,6 +33,8 @@ public class HangmanPlayer
     private int[]    activeIdx;      // live candidates occupy activeIdx[0..activeCount-1]
     private int      activeCount;
     private boolean[] guessedLetters; // guessedLetters[i] = true if 'a'+i already guessed
+    private int[]    guessFreq;      // reusable per-turn letter frequency buffer
+    private int      guessedMask;    // bitmask of letters already guessed
     private int      absentMask;     // bitmask: bit i -> letter i confirmed absent
     private int      presentMask;    // bitmask: bit i -> letter i confirmed present
     private char[]   posPattern;     // posPattern[i] = revealed char at position i, or ' '
@@ -109,6 +111,7 @@ public class HangmanPlayer
             if (lengthCount[L] > maxBucket) maxBucket = lengthCount[L];
         activeIdx      = new int[Math.max(maxBucket, 1)];
         guessedLetters = new boolean[26];
+        guessFreq      = new int[26];
         posPattern     = new char[MAX_LEN];
     }
  
@@ -119,6 +122,7 @@ public class HangmanPlayer
         {
             wordLen = currentWord.length();
             Arrays.fill(guessedLetters, false);
+            guessedMask = 0;
             absentMask  = 0;
             presentMask = 0;
  
@@ -148,16 +152,15 @@ public class HangmanPlayer
         // Filter candidates
         filterCandidates();
  
-        // Count letter frequencies with bit tricks
-        int[] freq       = new int[26];
-        int guessedMask  = buildGuessedMask();
+        // Count letter frequencies with bit tricks (reusing field buffer)
+        Arrays.fill(guessFreq, 0);
         int unguessedAll = ~guessedMask;
  
         for (int ci = 0; ci < activeCount; ci++) {
             int bits = allMasks[activeIdx[ci]] & unguessedAll;
             while (bits != 0) {
                 int c = Integer.numberOfTrailingZeros(bits);
-                freq[c]++;
+                guessFreq[c]++;
                 bits &= bits - 1;
             }
         }
@@ -165,8 +168,8 @@ public class HangmanPlayer
         // Pick best unguessed letter by frequency
         int best = -1;
         for (int i = 0; i < 26; i++) {
-            if (!guessedLetters[i] && freq[i] > 0)
-                if (best == -1 || freq[i] > freq[best]) best = i;
+            if (!guessedLetters[i] && guessFreq[i] > 0)
+                if (best == -1 || guessFreq[i] > guessFreq[best]) best = i;
         }
  
         // Fallback: per-length precomputed frequency (handles OOV words)
@@ -187,6 +190,7 @@ public class HangmanPlayer
         }
  
         guessedLetters[best] = true;
+        guessedMask |= (1 << best);
         return (char)('a' + best);
     }
  
@@ -255,14 +259,6 @@ public class HangmanPlayer
         int mask = 0;
         for (int i = 0; i < word.length(); i++)
             mask |= (1 << (word.charAt(i) - 'a'));
-        return mask;
-    }
- 
-    private int buildGuessedMask()
-    {
-        int mask = 0;
-        for (int i = 0; i < 26; i++)
-            if (guessedLetters[i]) mask |= (1 << i);
         return mask;
     }
 }
