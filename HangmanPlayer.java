@@ -33,12 +33,15 @@ public class HangmanPlayer
     private int[]    activeIdx;      // live candidates occupy activeIdx[0..activeCount-1]
     private int      activeCount;
     private boolean[] guessedLetters; // guessedLetters[i] = true if 'a'+i already guessed
-    private int[]    guessFreq;      // reusable per-turn letter frequency buffer
+    private int[]    liveFreq;       // live letter frequencies across active candidates
     private int      guessedMask;    // bitmask of letters already guessed
     private int      lastGuessIdx;   // index of most recent guess (0..25), or -1
     private int      absentMask;     // bitmask: bit i -> letter i confirmed absent
     private int      presentMask;    // bitmask: bit i -> letter i confirmed present
+    private int      prevAbsentMask; // snapshot used for delta filtering
+    private int      prevPresentMask;// snapshot used for delta filtering
     private char[]   posPattern;     // posPattern[i] = revealed char at position i, or ' '
+    private char[]   prevPosPattern; // previous pattern snapshot for delta filtering
     private int      wordLen;
  
     // English letter frequency fallback (last resort)
@@ -112,8 +115,10 @@ public class HangmanPlayer
             if (lengthCount[L] > maxBucket) maxBucket = lengthCount[L];
         activeIdx      = new int[Math.max(maxBucket, 1)];
         guessedLetters = new boolean[26];
-        guessFreq      = new int[26];
+        liveFreq       = new int[26];
         posPattern     = new char[MAX_LEN];
+        prevPosPattern = new char[MAX_LEN];
+        Arrays.fill(prevPosPattern, ' ');
     }
  
  
@@ -127,6 +132,9 @@ public class HangmanPlayer
             lastGuessIdx = -1;
             absentMask  = 0;
             presentMask = 0;
+            prevAbsentMask = 0;
+            prevPresentMask = 0;
+            Arrays.fill(prevPosPattern, ' ');
  
             for (int i = 0; i < wordLen; i++)
                 posPattern[i] = currentWord.charAt(i); // all ' ' at start
@@ -140,6 +148,9 @@ public class HangmanPlayer
             } else {
                 activeCount = 0;
             }
+
+            // Build starting live frequencies once for this word
+            rebuildLiveFreq();
         }
  
         // Sync posPattern and presentMask with currentWord (in case called before feedback)
@@ -151,27 +162,14 @@ public class HangmanPlayer
             }
         }
  
-        // Filter candidates
-        filterCandidates();
+        // Apply only constraints that are new since the last snapshot
+        filterCandidatesByDelta();
  
-        // Count letter frequencies with bit tricks (reusing field buffer)
-        Arrays.fill(guessFreq, 0);
-        int unguessedAll = ~guessedMask;
- 
-        for (int ci = 0; ci < activeCount; ci++) {
-            int bits = allMasks[activeIdx[ci]] & unguessedAll;
-            while (bits != 0) {
-                int c = Integer.numberOfTrailingZeros(bits);
-                guessFreq[c]++;
-                bits &= bits - 1;
-            }
-        }
- 
-        // Pick best unguessed letter by frequency
+        // Pick best unguessed letter by live active-candidate frequency
         int best = -1;
         for (int i = 0; i < 26; i++) {
-            if (!guessedLetters[i] && guessFreq[i] > 0)
-                if (best == -1 || guessFreq[i] > guessFreq[best]) best = i;
+            if (!guessedLetters[i] && liveFreq[i] > 0)
+                if (best == -1 || liveFreq[i] > liveFreq[best]) best = i;
         }
  
         // Fallback: per-length precomputed frequency (handles OOV words)
@@ -214,43 +212,93 @@ public class HangmanPlayer
                 }
             }
         }
+
+        // Keep candidate set/live frequencies current for the next guess turn.
+        filterCandidatesByDelta();
     }
  
  
-    private void filterCandidates()
+    private void filterCandidatesByDelta()
     {
+        int newAbsentBits = absentMask & ~prevAbsentMask;
+        int newPresentBits = presentMask & ~prevPresentMask;
+        boolean hasNewReveals = false;
+        for (int i = 0; i < wordLen; i++) {
+            if (prevPosPattern[i] != posPattern[i]) {
+                hasNewReveals = true;
+                break;
+            }
+        }
+
+        // Nothing new since last filtering pass.
+        if (newAbsentBits == 0 && newPresentBits == 0 && !hasNewReveals) return;
+
         int write = 0;
         for (int read = 0; read < activeCount; read++) {
             int widx = activeIdx[read];
             int mask = allMasks[widx];
  
-            // Level 1: bitmask checks (O(1))
-            if ((mask & absentMask)  != 0)          continue; // contains absent letter
-            if ((mask & presentMask) != presentMask) continue; // missing required letter
+            // Fast delta checks using only new constraints.
+            if ((mask & newAbsentBits) != 0) {
+                removeFromLiveFreq(widx);
+                continue;
+            }
+            if ((mask & newPresentBits) != newPresentBits) {
+                removeFromLiveFreq(widx);
+                continue;
+            }
  
-            // Level 2: position match (O(L))
-            if (!positionMatch(allWords[widx]))      continue;
+            // Check only newly revealed position constraints.
+            if (!positionMatchDelta(allWords[widx])) {
+                removeFromLiveFreq(widx);
+                continue;
+            }
  
             activeIdx[write++] = widx;
         }
         activeCount = write;
+        snapshotFilterState();
     }
  
-    private boolean positionMatch(String word)
+    private boolean positionMatchDelta(String word)
     {
         for (int i = 0; i < wordLen; i++) {
             char p = posPattern[i];
-            if (p != ' ') {
-                // Revealed position: candidate must match exactly
-                if (word.charAt(i) != p) return false;
-            } else {
-                
-                //fix here
-                int idx = word.charAt(i) - 'a';
-                if (idx >= 0 && idx < 26 && (presentMask >> idx & 1) == 1) return false;
-            }
+            if (p == prevPosPattern[i]) continue; // unchanged since last snapshot
+            if (p != ' ' && word.charAt(i) != p) return false;
         }
         return true;
+    }
+
+    private void snapshotFilterState()
+    {
+        prevAbsentMask = absentMask;
+        prevPresentMask = presentMask;
+        for (int i = 0; i < wordLen; i++) prevPosPattern[i] = posPattern[i];
+    }
+
+    private void rebuildLiveFreq()
+    {
+        Arrays.fill(liveFreq, 0);
+        int unguessedAll = ~guessedMask;
+        for (int i = 0; i < activeCount; i++) {
+            int bits = allMasks[activeIdx[i]] & unguessedAll;
+            while (bits != 0) {
+                int c = Integer.numberOfTrailingZeros(bits);
+                liveFreq[c]++;
+                bits &= bits - 1;
+            }
+        }
+    }
+
+    private void removeFromLiveFreq(int widx)
+    {
+        int bits = allMasks[widx] & ~guessedMask;
+        while (bits != 0) {
+            int c = Integer.numberOfTrailingZeros(bits);
+            liveFreq[c]--;
+            bits &= bits - 1;
+        }
     }
  
  
