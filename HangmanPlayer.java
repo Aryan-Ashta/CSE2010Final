@@ -35,6 +35,7 @@ public class HangmanPlayer
     private boolean[] guessedLetters; // guessedLetters[i] = true if 'a'+i already guessed
     private int[]    guessFreq;      // reusable per-turn letter frequency buffer
     private int      guessedMask;    // bitmask of letters already guessed
+    private int      lastGuessIdx;   // index of most recent guess (0..25), or -1
     private int      absentMask;     // bitmask: bit i -> letter i confirmed absent
     private int      presentMask;    // bitmask: bit i -> letter i confirmed present
     private char[]   posPattern;     // posPattern[i] = revealed char at position i, or ' '
@@ -123,6 +124,7 @@ public class HangmanPlayer
             wordLen = currentWord.length();
             Arrays.fill(guessedLetters, false);
             guessedMask = 0;
+            lastGuessIdx = -1;
             absentMask  = 0;
             presentMask = 0;
  
@@ -191,6 +193,7 @@ public class HangmanPlayer
  
         guessedLetters[best] = true;
         guessedMask |= (1 << best);
+        lastGuessIdx = best;
         return (char)('a' + best);
     }
  
@@ -199,10 +202,8 @@ public class HangmanPlayer
     {
         if (!isCorrectGuess) {
             // The letter guessed but not revealed anywhere is confirmed absent
-            for (int i = 0; i < 26; i++) {
-                if (guessedLetters[i] && ((presentMask >> i & 1) == 0))
-                    absentMask |= (1 << i);
-            }
+            if (lastGuessIdx >= 0 && ((presentMask >> lastGuessIdx & 1) == 0))
+                absentMask |= (1 << lastGuessIdx);
         } else {
             // Update posPattern and presentMask with newly revealed positions
             for (int i = 0; i < wordLen && i < currentWord.length(); i++) {
