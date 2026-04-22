@@ -17,7 +17,7 @@ import java.util.*;
  
 public class HangmanPlayer
 {
-    private static final int MAX_LEN = 24;
+    private static final int MAX_LEN = 25;
     private static final int EXACT_PARTITION_THRESHOLD = 0;
     private static final int WEIGHTED_APPROX_THRESHOLD = 96;
     private static final int FAST_FALLBACK_THRESHOLD = 80;
