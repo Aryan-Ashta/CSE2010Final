@@ -20,12 +20,19 @@ public class HangmanPlayer
     private static final int MAX_LEN = 25;
     private static final int EXACT_PARTITION_THRESHOLD = 8;
     private static final int WEIGHTED_APPROX_THRESHOLD = 96;
-    private static final int FAST_FALLBACK_THRESHOLD = 80;
+    private static final int FAST_FALLBACK_THRESHOLD = 112;
     private static final int SELECTIVE_EXACT_MIN = 2;
     private static final int SELECTIVE_EXACT_MAX = 0;
     private static final int SELECTIVE_EXACT_TOP_K = 4;
     private static final int SELECTIVE_EXACT_CLOSE_MARGIN = 2;
     private static final int LIVE_STATS_ACTIVATE_THRESHOLD = 0;
+    private static boolean USE_OPTIMIZED_APPROX = false;
+    private static boolean USE_OPTIMIZED_LARGE_LIVE_PICK = false;
+    private static final int LARGE_LIVE_BASELINE_MIN = 80;
+    private static final int LARGE_LIVE_BASELINE_MAX = 120;
+    private static boolean USE_PRIOR_BLEND = false;
+    private static final int PRIOR_BLEND_ALPHA_NUM = 7;
+    private static final int PRIOR_BLEND_DEN = 8;
     private static final int[] LETTER_MASK = new int[26];
     private static final int ALL_LETTERS_MASK = (1 << 26) - 1;
     static {
@@ -48,6 +55,7 @@ public class HangmanPlayer
     private int[][] lengthFreq;
     private int[][] lengthWeightedFreq;
     private int[][] lengthRevealFreq;
+    private int[][] lengthBlendedFreq;
     private int[][] openingOrder;
 
     // Per-hidden-word mutable state.
@@ -67,6 +75,7 @@ public class HangmanPlayer
     private int wordLenBucket;
     private char[] posPattern;
     private int unknownPosMask;
+    private boolean feedbackStateSynced;
     private int[] changedPos;
     private int changedPosCount;
 
@@ -97,6 +106,7 @@ public class HangmanPlayer
         lengthFreq = new int[MAX_LEN][26];
         lengthWeightedFreq = new int[MAX_LEN][26];
         lengthRevealFreq = new int[MAX_LEN][26];
+        lengthBlendedFreq = new int[MAX_LEN][26];
         openingOrder = new int[MAX_LEN][26];
 
         @SuppressWarnings("unchecked")
@@ -125,6 +135,7 @@ public class HangmanPlayer
         }
 
         int maxWordLongs = 1;
+        int maxWordCount = 1;
         for (int L = 0; L < MAX_LEN; L++) {
             ArrayList<String> bucket = buckets[L];
             if (bucket == null || bucket.isEmpty()) continue;
@@ -163,8 +174,14 @@ public class HangmanPlayer
                 }
             }
             buildOpeningOrder(L);
+            if (USE_PRIOR_BLEND) {
+                buildBlendedPriorStats(L);
+            } else {
+                System.arraycopy(lengthWeightedFreq[L], 0, lengthBlendedFreq[L], 0, 26);
+            }
             models[L] = model;
             if (model.wordLongs > maxWordLongs) maxWordLongs = model.wordLongs;
+            if (model.wordCount > maxWordCount) maxWordCount = model.wordCount;
         }
 
         liveBits = new long[maxWordLongs];
@@ -173,8 +190,9 @@ public class HangmanPlayer
         posPattern = new char[MAX_LEN];
         changedPos = new int[MAX_LEN];
         revealCache = new int[26];
-        exactLiveIdx = new int[Math.max(EXACT_PARTITION_THRESHOLD + 4, 32)];
-        exactOutcomeBuf = new int[Math.max(EXACT_PARTITION_THRESHOLD + 4, 32) * 26];
+        int initialExactCapacity = Math.max(WEIGHTED_APPROX_THRESHOLD + 8, Math.min(maxWordCount, 512));
+        exactLiveIdx = new int[initialExactCapacity];
+        exactOutcomeBuf = new int[initialExactCapacity * 26];
         int initialHashCap = 128;
         partHashKeys = new int[initialHashCap];
         partHashWeights = new long[initialHashCap];
@@ -197,7 +215,6 @@ public class HangmanPlayer
             wordLenBucket = Math.min(wordLen, MAX_LEN - 1);
             liveModel = (wordLen < MAX_LEN) ? models[wordLen] : null;
             if (liveModel != null) {
-                Arrays.fill(liveBits, 0L);
                 System.arraycopy(liveModel.allBits, 0, liveBits, 0, liveModel.wordLongs);
                 liveCount = liveModel.wordCount;
                 liveStatsActive = liveCount <= LIVE_STATS_ACTIVATE_THRESHOLD;
@@ -221,13 +238,14 @@ public class HangmanPlayer
             presentMask = 0;
             prevAbsentMask = 0;
             prevPresentMask = 0;
+            feedbackStateSynced = true;
             changedPosCount = 0;
             unknownPosMask = (wordLen == 0) ? 0 : ((1 << wordLen) - 1);
             Arrays.fill(posPattern, 0, wordLen, ' ');
         }
 
         // Sync posPattern/presentMask and changed positions with currentWord.
-        syncFromCurrentWord(currentWord);
+        if (!feedbackStateSynced) syncFromCurrentWord(currentWord);
  
         // Apply only constraints that are new since the last snapshot
         filterCandidatesByDelta();
@@ -259,6 +277,7 @@ public class HangmanPlayer
         }
         guessedMask |= LETTER_MASK[best];
         lastGuessIdx = best;
+        feedbackStateSynced = false;
         return (char)('a' + best);
     }
  
@@ -266,8 +285,9 @@ public class HangmanPlayer
     public void feedback(boolean isCorrectGuess, String currentWord)
     {
         // End-of-word feedback cannot influence future guesses for this word.
-        if (currentWord.indexOf(' ') == -1) {
+        if (unknownPosMask == 0) {
             snapshotFilterState();
+            feedbackStateSynced = true;
             return;
         }
 
@@ -278,10 +298,16 @@ public class HangmanPlayer
         } else {
             // Update posPattern/presentMask and changed positions.
             syncFromCurrentWord(currentWord);
+            if (unknownPosMask == 0) {
+                snapshotFilterState();
+                feedbackStateSynced = true;
+                return;
+            }
         }
 
         // Keep candidate set/live frequencies current for the next guess turn.
         filterCandidatesByDelta();
+        feedbackStateSynced = true;
     }
  
  
@@ -300,12 +326,12 @@ public class HangmanPlayer
         if (newAbsentBits == 0 && newPresentBits == 0 && changedCount == 0) return;
 
         if (liveStatsActive) {
+            System.arraycopy(liveBits, 0, removedScratch, 0, liveModel.wordLongs);
             for (int i = 0; i < changedCount; i++) {
                 int pos = changedPos[i];
                 int letterIdx = posPattern[pos] - 'a';
                 liveRevealCount[letterIdx] -= intersectionCount(liveBits, liveModel.posBits[letterIdx][pos], liveModel.wordLongs);
             }
-            System.arraycopy(liveBits, 0, removedScratch, 0, liveModel.wordLongs);
         }
 
         for (int i = 0; i < changedCount; i++) {
@@ -332,12 +358,16 @@ public class HangmanPlayer
         if (bits != 0 && unknownPosMask != 0) {
             while (bits != 0) {
                 int letterIdx = Integer.numberOfTrailingZeros(bits);
-                Arrays.fill(mergeScratch, 0, liveModel.wordLongs, 0L);
                 int posBits = unknownPosMask;
-                while (posBits != 0) {
-                    int pos = Integer.numberOfTrailingZeros(posBits);
-                    orInto(mergeScratch, liveModel.posBits[letterIdx][pos], liveModel.wordLongs);
+                if (posBits != 0) {
+                    int firstPos = Integer.numberOfTrailingZeros(posBits);
+                    System.arraycopy(liveModel.posBits[letterIdx][firstPos], 0, mergeScratch, 0, liveModel.wordLongs);
                     posBits &= posBits - 1;
+                    while (posBits != 0) {
+                        int pos = Integer.numberOfTrailingZeros(posBits);
+                        orInto(mergeScratch, liveModel.posBits[letterIdx][pos], liveModel.wordLongs);
+                        posBits &= posBits - 1;
+                    }
                 }
                 andNotWith(liveBits, mergeScratch, liveModel.wordLongs);
                 bits &= bits - 1;
@@ -389,6 +419,18 @@ public class HangmanPlayer
         return lengthWeightedFreq[L][letter];
     }
 
+    private void buildBlendedPriorStats(int L)
+    {
+        int alpha = PRIOR_BLEND_ALPHA_NUM;
+        int beta = PRIOR_BLEND_DEN - PRIOR_BLEND_ALPHA_NUM;
+        int[] dst = lengthBlendedFreq[L];
+        int[] base = lengthWeightedFreq[L];
+        int[] reveal = lengthRevealFreq[L];
+        for (int i = 0; i < 26; i++) {
+            dst[i] = (alpha * base[i] + beta * reveal[i]) / PRIOR_BLEND_DEN;
+        }
+    }
+
     private int pickBestLetter(int unguessedMask)
     {
         if (unguessedMask == 0) return -1;
@@ -409,6 +451,11 @@ public class HangmanPlayer
         // Speed-first shortcut: skip expensive live-bitset intersections while candidate
         // space is still very large; use strong per-length weighted priors first.
         if (liveCount >= FAST_FALLBACK_THRESHOLD) {
+            if (USE_OPTIMIZED_LARGE_LIVE_PICK
+                    && (liveCount < LARGE_LIVE_BASELINE_MIN || liveCount > LARGE_LIVE_BASELINE_MAX)) {
+                int liveStatBest = pickByLiveStatsScore(unguessedMask);
+                if (liveStatBest != -1) return liveStatBest;
+            }
             if (presentMask == 0) {
                 int opening = pickOpeningLetter(unguessedMask);
                 if (opening != -1) return opening;
@@ -440,8 +487,92 @@ public class HangmanPlayer
         return best;
     }
 
+    private int pickByLiveStatsScore(int unguessedMask)
+    {
+        int best = -1;
+        int bestHit = Integer.MIN_VALUE;
+        int bestReveal = Integer.MIN_VALUE;
+        int[] fallback = lengthBlendedFreq[wordLenBucket];
+        int bits = unguessedMask;
+        while (bits != 0) {
+            int letter = Integer.numberOfTrailingZeros(bits);
+            int hit = liveHitCount[letter];
+            int reveal = liveRevealCount[letter];
+            if (best == -1
+                    || hit > bestHit
+                    || (hit == bestHit && reveal > bestReveal)
+                    || (hit == bestHit && reveal == bestReveal
+                            && fallback[letter] > fallback[best])) {
+                best = letter;
+                bestHit = hit;
+                bestReveal = reveal;
+            }
+            bits &= bits - 1;
+        }
+        return best;
+    }
+
+    private int pickByApproximateScoreSinglePass(int unguessedMask)
+    {
+        if (liveCount <= WEIGHTED_APPROX_THRESHOLD) {
+            return pickByWeightedApproximateScore(unguessedMask);
+        }
+
+        ensureExactCapacity(liveCount);
+        int liveSize = collectLiveIndices();
+        int[] hit = weightedHitBuf;
+        int[] reveal = weightedRevealBuf;
+        Arrays.fill(hit, 0);
+        Arrays.fill(reveal, 0);
+        int[] masks = liveModel.masks;
+        char[][] words = liveModel.words;
+
+        for (int i = 0; i < liveSize; i++) {
+            int idx = exactLiveIdx[i];
+            int letterBits = masks[idx] & unguessedMask;
+            while (letterBits != 0) {
+                int letter = Integer.numberOfTrailingZeros(letterBits);
+                hit[letter]++;
+                letterBits &= letterBits - 1;
+            }
+
+            char[] word = words[idx];
+            int posBits = unknownPosMask;
+            while (posBits != 0) {
+                int pos = Integer.numberOfTrailingZeros(posBits);
+                int letter = word[pos] - 'a';
+                if ((unguessedMask & LETTER_MASK[letter]) != 0) reveal[letter]++;
+                posBits &= posBits - 1;
+            }
+        }
+
+        int best = -1;
+        int bestHit = -1;
+        int bestReveal = -1;
+        int[] fallback = lengthBlendedFreq[wordLenBucket];
+        int bits = unguessedMask;
+        while (bits != 0) {
+            int letter = Integer.numberOfTrailingZeros(bits);
+            if (best == -1
+                    || hit[letter] > bestHit
+                    || (hit[letter] == bestHit && reveal[letter] > bestReveal)
+                    || (hit[letter] == bestHit && reveal[letter] == bestReveal
+                            && fallback[letter] > fallback[best])) {
+                best = letter;
+                bestHit = hit[letter];
+                bestReveal = reveal[letter];
+            }
+            bits &= bits - 1;
+        }
+        return best;
+    }
+
     private int pickByApproximateScore(int unguessedMask)
     {
+        if (USE_OPTIMIZED_APPROX) {
+            return pickByApproximateScoreSinglePass(unguessedMask);
+        }
+
         if (liveCount <= WEIGHTED_APPROX_THRESHOLD) {
             return pickByWeightedApproximateScore(unguessedMask);
         }
@@ -449,7 +580,7 @@ public class HangmanPlayer
         int best = -1;
         int bestHit = -1;
         int bestReveal = -1;
-        int[] weightedFallback = lengthWeightedFreq[wordLenBucket];
+        int[] weightedFallback = lengthBlendedFreq[wordLenBucket];
         int tieMask = 0;
         int bits = unguessedMask;
         while (bits != 0) {
@@ -525,7 +656,7 @@ public class HangmanPlayer
         int bestHit = -1;
         int bestReveal = -1;
         int tieMask = 0;
-        int[] weightedFallback = lengthWeightedFreq[wordLenBucket];
+        int[] weightedFallback = lengthBlendedFreq[wordLenBucket];
         int bits = unguessedMask;
         while (bits != 0) {
             int i = Integer.numberOfTrailingZeros(bits);
@@ -606,7 +737,7 @@ public class HangmanPlayer
         if (b < 0) return true;
         if (liveHitCount[a] != liveHitCount[b]) return liveHitCount[a] > liveHitCount[b];
         if (liveRevealCount[a] != liveRevealCount[b]) return liveRevealCount[a] > liveRevealCount[b];
-        return lengthWeightedFreq[wordLenBucket][a] > lengthWeightedFreq[wordLenBucket][b];
+        return lengthBlendedFreq[wordLenBucket][a] > lengthBlendedFreq[wordLenBucket][b];
     }
 
     private int pickByExactPartitionScore(int unguessedMask)
@@ -682,7 +813,7 @@ public class HangmanPlayer
                     || (hitCount == bestHitCount
                             && expectedRemainNumerator == bestExpectedRemainNumerator
                             && revealTotal == bestRevealTotal
-                            && lengthFreq[wordLenBucket][letterIdx] > lengthFreq[wordLenBucket][best])) {
+                            && lengthBlendedFreq[wordLenBucket][letterIdx] > lengthBlendedFreq[wordLenBucket][best])) {
                 best = letterIdx;
                 bestHitCount = hitCount;
                 bestExpectedRemainNumerator = expectedRemainNumerator;

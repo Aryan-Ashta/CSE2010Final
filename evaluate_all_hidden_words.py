@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+
 
 REQUIRED_METRICS = (
     "accuracy",
@@ -52,6 +54,35 @@ def summarize_metric(name: str, values: list[float]) -> str:
         f"{name}: avg={statistics.fmean(values):.6f}, "
         f"min={min(values):.6f}, max={max(values):.6f}"
     )
+
+
+def make_distribution_plots(
+    output_path: Path,
+    score_values: list[float],
+    accuracy_values: list[float],
+    speed_values: list[float],
+    memory_values: list[float],
+) -> None:
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle("Distribution of Evaluation Metrics", fontsize=14)
+
+    plot_data = (
+        ("Score", score_values, "Score"),
+        ("Accuracy", accuracy_values, "Accuracy"),
+        ("CPU Time Per Guess (seconds)", speed_values, "Seconds"),
+        ("Memory (bytes)", memory_values, "Bytes"),
+    )
+
+    for ax, (title, values, xlabel) in zip(axes.flatten(), plot_data):
+        ax.hist(values, bins=12, edgecolor="black")
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Count")
+        ax.grid(alpha=0.2)
+
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig.savefig(output_path, dpi=150)
+    plt.show()
 
 
 def main() -> int:
@@ -107,6 +138,8 @@ def main() -> int:
     score_values = [entry[1]["score"] for entry in all_results]
 
     best_name, best_metrics = max(all_results, key=lambda item: item[1]["score"])
+    worst_name, worst_metrics = min(all_results, key=lambda item: item[1]["score"])
+    plot_path = repo_root / "evaluation_distributions.png"
 
     print("\n=== Aggregate Results (hiddenWords1..hiddenWords100) ===")
     print(summarize_metric("Accuracy", accuracy_values))
@@ -121,6 +154,23 @@ def main() -> int:
         f"speed={best_metrics['cpu_time_per_guess']:.6f}, "
         f"memory={best_metrics['memory_bytes']:.0f})"
     )
+    print(
+        "Worst score run: "
+        f"{worst_name} "
+        f"(score={worst_metrics['score']:.6f}, "
+        f"accuracy={worst_metrics['accuracy']:.6f}, "
+        f"speed={worst_metrics['cpu_time_per_guess']:.6f}, "
+        f"memory={worst_metrics['memory_bytes']:.0f})"
+    )
+
+    make_distribution_plots(
+        plot_path,
+        score_values=score_values,
+        accuracy_values=accuracy_values,
+        speed_values=speed_values,
+        memory_values=memory_values,
+    )
+    print(f"Saved distribution plot to: {plot_path}")
 
     return 0
 
