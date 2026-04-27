@@ -15,15 +15,42 @@ REQUIRED_METRICS = (
     "score",
 )
 
+FLOAT_PATTERN = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+
 METRIC_PATTERNS = {
-    "accuracy": re.compile(r"^Accuracy:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$", re.MULTILINE),
+    "accuracy": re.compile(rf"^\s*Accuracy:\s*{FLOAT_PATTERN}\s*$", re.MULTILINE),
     "cpu_time_per_guess": re.compile(
-        r"^CPU time per guess in seconds:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$",
+        rf"^\s*CPU\s+time\s+per\s+guess\s+in\s+seconds:\s*{FLOAT_PATTERN}\s*$",
         re.MULTILINE,
     ),
-    "memory_bytes": re.compile(r"^Memory in bytes:\s*([-+]?\d+)\s*$", re.MULTILINE),
-    "score": re.compile(r"^Score:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$", re.MULTILINE),
+    "memory_bytes": re.compile(r"^\s*Memory\s+in\s+bytes:\s*([-+]?\d+)\s*$", re.MULTILINE),
+    "score": re.compile(rf"^\s*Score:\s*{FLOAT_PATTERN}\s*$", re.MULTILINE),
 }
+
+EXPECTED_LABELS = {
+    "accuracy": "Accuracy:",
+    "cpu_time_per_guess": "CPU time per guess in seconds:",
+    "memory_bytes": "Memory in bytes:",
+    "score": "Score:",
+}
+
+
+def metric_context(output: str, key: str) -> str:
+    expected_label = EXPECTED_LABELS[key].rstrip(":").lower()
+    context_lines = [
+        line for line in output.splitlines() if expected_label in line.lower()
+    ]
+
+    if key == "cpu_time_per_guess" and not context_lines:
+        context_lines = [
+            line
+            for line in output.splitlines()
+            if "cpu" in line.lower() or "time per guess" in line.lower()
+        ]
+
+    if not context_lines:
+        return "(No related output lines found.)"
+    return "\n".join(context_lines[:8])
 
 
 def run_command(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -41,8 +68,11 @@ def parse_metrics(output: str, hidden_file: str) -> dict[str, float]:
     for key in REQUIRED_METRICS:
         match = METRIC_PATTERNS[key].search(output)
         if not match:
+            expected_label = EXPECTED_LABELS[key]
             raise ValueError(
                 f"Could not parse '{key}' from evaluator output for {hidden_file}.\n"
+                f"Expected a line starting with '{expected_label}'.\n"
+                f"Related output lines:\n{metric_context(output, key)}\n"
                 f"--- Evaluator output start ---\n{output}\n--- Evaluator output end ---"
             )
         parsed[key] = float(match.group(1))
