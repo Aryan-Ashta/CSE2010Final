@@ -24,8 +24,8 @@ public class HangmanPlayer
 {
     // Tuning constants and shared letter-to-bit mappings.
     private static final int MAX_LEN = 24;
-    private static final int EXACT_PARTITION_THRESHOLD = 8;
-    private static final int WEIGHTED_APPROX_THRESHOLD = 96;
+    private static final int EXACT_PARTITION_THRESHOLD = 12;
+    private static final int WEIGHTED_APPROX_THRESHOLD = 64;
     private static final int FAST_FALLBACK_THRESHOLD = 112;
     private static final int[] LETTER_MASK = new int[26];
     private static final int ALL_LETTERS_MASK = (1 << 26) - 1;
